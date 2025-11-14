@@ -312,7 +312,7 @@
         <small>Get your key from <a href="https://aistudio.google.com/app/apikey" target="_blank">AI Studio</a></small>
       </div>
       <div class="result-footer">
-        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a></span>
+        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a>  |  Ctrl+E to quick hide</span>
       </div>`;
 
     const closeButton = resultDiv.querySelector(".close-result-btn");
@@ -434,7 +434,7 @@
         <div class="setting-item">
           <div class="setting-label">
             <div class="setting-label-title">Max Tokens</div>
-            <div class="setting-label-desc">Maximum response length</div>
+            <div class="setting-label-desc">Maximum response length. Higher values allow for harder problems but you will hit your quota faster.</div>
           </div>
           <div class="token-slider-container">
             <div class="token-slider-value" id="token-value">${
@@ -482,7 +482,7 @@
         </div>
       </div>
       <div class="result-footer">
-        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a></span>
+        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a>  |  Ctrl+E to quick hide</span>
       </div>`;
 
     const closeButton = resultDiv.querySelector(".close-result-btn");
@@ -822,7 +822,7 @@
       </div>
       <div class="result-content ${contentClass}"></div>
       <div class="result-footer">
-        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a></span>
+        <span>DogeUB - <a id="discord-link">discord.gg/unblocking</a>  |  Ctrl+E to quick hide</span>
       </div>`;
 
     const contentElement = resultDiv.querySelector(".result-content");
@@ -897,7 +897,7 @@
 
         const copyBtn = document.createElement("button");
         copyBtn.className = "answer-item-btn copy-btn";
-        copyBtn.textContent = "Copy";
+        copyBtn.innerHTML = `<i data-lucide="clipboard" style="width: 13px; height: 13px;"></i>`;
         copyBtn.title = `Copy: ${evaluatedAnswer}`;
 
         copyBtn.addEventListener("click", async () => {
