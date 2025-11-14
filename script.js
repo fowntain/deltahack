@@ -123,6 +123,7 @@
     let safe = answer.replace(/«([^»]+)»/g, "$1");
     safe = escapeHtml(safe);
 
+    safe = safe.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
 
     safe = safe.replace(/\^\{([^}]+)\}/g, "<sup>$1</sup>");
