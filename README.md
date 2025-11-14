@@ -51,5 +51,5 @@ cd deltahack
 
 ## License
 
-This project is licensed under the **GNU Affero GPL v3**.  
+This project is licensed under the **GNU GPL v3**.  
 See the [LICENSE](LICENSE) file for more details.
