@@ -25,7 +25,8 @@ Deltahack is a sleek, simple Deltamath cheat that simply extracts page content, 
 ---
 
 ## Usage
-
+1. Get yourself a free API key from Google's [AI Studio](https://aistudio.google.com/api-keys)
+2. Do one of the methods below and just paste in your API key when asked
 
 ### Bookmarklet
 Simply copy the code below into the URL section of a bookmark, then click the bookmark when you're on Deltamath.
