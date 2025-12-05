@@ -8,7 +8,7 @@
   }
   console.log("Deltahack: Initializing...");
   let e = {
-      GEMINI_API_KEY: "",
+      GEMINI_API_KEY: "AIzaSyBOWdxRh29lRxTYKHWzd4kEBaFcXJF45oU",
       GEMINI_API_URL:
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
     },
