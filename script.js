@@ -41,6 +41,8 @@
     showExplanations:
       localStorage.getItem("math_scanner_explanations") === "true",
     hideKeybind: localStorage.getItem("math_scanner_hide_keybind") || "ctrl+e",
+    scanKeybind: localStorage.getItem("math_scanner_scan_keybind") || "ctrl+r",
+    proxyUrl: localStorage.getItem("math_scanner_proxy_url") || "",
     isHidden: false,
   };
 
@@ -151,6 +153,250 @@
     return matches.join("\n");
   }
 
+  async function copyWithRetry(text, retries, delay) {
+    retries = retries || 3;
+    delay = delay || 100;
+    for (var attempt = 1; attempt <= retries; attempt++) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.cssText = "position:fixed;opacity:0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          var ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if (!ok) throw new Error("execCommand copy failed");
+        }
+        return true;
+      } catch (e) {
+        if (attempt < retries) {
+          await new Promise(function(r) { setTimeout(r, delay); });
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
+
+  function executeSandboxedJS(code, timeout = 15000) {
+    return new Promise((resolve, reject) => {
+      const id = "sbx_" + Math.random().toString(36).substr(2, 12);
+      let timer, iframe;
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        window.removeEventListener("message", handler);
+        if (iframe && iframe.parentNode) iframe.remove();
+      };
+
+      const handler = (e) => {
+        if (!e.data || e.data.sbxId !== id) return;
+        if (e.data.ready) {
+          iframe.contentWindow.postMessage({ sbxId: id, code }, "*");
+          return;
+        }
+        cleanup();
+        if (e.data.error) {
+          reject(new Error(e.data.error));
+        } else {
+          resolve(e.data.result);
+        }
+      };
+
+      window.addEventListener("message", handler);
+
+      iframe = document.createElement("iframe");
+      iframe.sandbox = "allow-scripts";
+      iframe.style.cssText =
+        "position:fixed;width:0;height:0;border:0;opacity:0;pointer-events:none;z-index:-1";
+      iframe.srcdoc = [
+        "<script>",
+        "window.addEventListener('message', function(e) {",
+        "  if (!e.data || e.data.sbxId !== '" + id + "') return;",
+        "  try {",
+        "    var __fn = new Function(e.data.code);",
+        "    var __r = __fn();",
+        "    parent.postMessage({sbxId: '" + id + "', result: __r == null ? 'undefined' : String(__r)}, '*');",
+        "  } catch(err) {",
+        "    parent.postMessage({sbxId: '" + id + "', error: err.message}, '*');",
+        "  }",
+        "});",
+        "parent.postMessage({sbxId: '" + id + "', ready: true}, '*');",
+        "<\/script>",
+      ].join("\n");
+
+      document.body.appendChild(iframe);
+
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Code execution timed out (" + timeout + "ms)"));
+      }, timeout);
+    });
+  }
+
+  function transpilePythonToJS(pyCode) {
+    let js = pyCode;
+
+    js = js.replace(
+      /^\s*(import\s+math|from\s+math\s+import\s+[^;\n]*)\s*$/gm,
+      ""
+    );
+    js = js.replace(/^\s*import\s+\w+.*$/gm, "");
+    js = js.replace(/^\s*from\s+\w+\s+import\s+.*$/gm, "");
+
+    const mathMap = {
+      "math.sqrt": "Math.sqrt",
+      "math.pi": "Math.PI",
+      "math.e": "Math.E",
+      "math.sin": "Math.sin",
+      "math.cos": "Math.cos",
+      "math.tan": "Math.tan",
+      "math.asin": "Math.asin",
+      "math.acos": "Math.acos",
+      "math.atan": "Math.atan",
+      "math.atan2": "Math.atan2",
+      "math.log10": "Math.log10",
+      "math.log2": "Math.log2",
+      "math.log": "Math.log",
+      "math.floor": "Math.floor",
+      "math.ceil": "Math.ceil",
+      "math.pow": "Math.pow",
+      "math.fabs": "Math.abs",
+      "math.inf": "Infinity",
+    };
+    for (const [py, jsFn] of Object.entries(mathMap)) {
+      js = js.split(py).join(jsFn);
+    }
+
+    js = js.replace(/\babs\(/g, "Math.abs(");
+    js = js.replace(
+      /\bround\(([^,)]+),\s*(\d+)\)/g,
+      "parseFloat(($1).toFixed($2))"
+    );
+    js = js.replace(/\bround\(([^)]+)\)/g, "Math.round($1)");
+    js = js.replace(/\bint\(/g, "Math.trunc(");
+    js = js.replace(/\bfloat\(/g, "Number(");
+    js = js.replace(/\bstr\(/g, "String(");
+
+    js = js.replace(/\bTrue\b/g, "true");
+    js = js.replace(/\bFalse\b/g, "false");
+    js = js.replace(/\bNone\b/g, "null");
+
+    js = js.replace(
+      /(\w[\w.]*)\s*\/\/\s*(\w[\w.]*)/g,
+      "Math.floor($1 / $2)"
+    );
+
+    js = js.replace(/(^|\s)#(.*)$/gm, "$1//$2");
+
+    let hasPrint = /\bprint\s*\(/.test(js);
+    if (hasPrint) {
+      js =
+        'var __out = [];\n' +
+        js.replace(
+          /\bprint\s*\(([^)]*)\)/g,
+          "__out.push(String($1))"
+        ) +
+        '\nreturn __out.join("\\n");';
+    } else if (!/\breturn\b/.test(js)) {
+      let lines = js.split("\n").filter((l) => l.trim());
+      if (lines.length > 0) {
+        let last = lines[lines.length - 1].trim();
+        if (
+          !last.startsWith("var ") &&
+          !last.startsWith("let ") &&
+          !last.startsWith("//") &&
+          !last.startsWith("}") &&
+          last !== ""
+        ) {
+          lines[lines.length - 1] = "return " + last;
+        }
+      }
+      js = lines.join("\n");
+    }
+
+    return js;
+  }
+
+  async function processCodeBlocks(answer) {
+    const jsBlockRegex = /\[EXEC_JS\]([\s\S]*?)\[\/EXEC_JS\]/g;
+    const pyBlockRegex = /\[EXEC_PY\]([\s\S]*?)\[\/EXEC_PY\]/g;
+
+    let result = answer;
+    const blocks = [];
+    let match;
+
+    while ((match = jsBlockRegex.exec(answer)) !== null) {
+      blocks.push({
+        full: match[0],
+        code: match[1].trim(),
+        lang: "js",
+        index: match.index,
+      });
+    }
+    while ((match = pyBlockRegex.exec(answer)) !== null) {
+      blocks.push({
+        full: match[0],
+        code: match[1].trim(),
+        lang: "py",
+        index: match.index,
+      });
+    }
+
+    if (blocks.length === 0) {
+      console.warn(
+        "Deltahack: ⚠ No [EXEC_JS] or [EXEC_PY] code blocks found in AI response. AI did not use code execution."
+      );
+      return answer;
+    }
+
+    console.log(
+      `Deltahack: ✓ Found ${blocks.length} code block(s) to execute.`
+    );
+
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      try {
+        let codeToRun = block.code;
+        if (block.lang === "py") {
+          console.log(
+            `Deltahack: [Block ${i + 1}/${blocks.length}] Transpiling Python → JS...`
+          );
+          codeToRun = transpilePythonToJS(codeToRun);
+          console.log(
+            `Deltahack: [Block ${i + 1}] Transpiled code:`,
+            codeToRun
+          );
+        }
+
+        console.log(
+          `Deltahack: [Block ${i + 1}/${blocks.length}] Executing ${block.lang} in sandbox:\n`,
+          block.code
+        );
+        const execResult = await executeSandboxedJS(codeToRun);
+        console.log(
+          `Deltahack: [Block ${i + 1}/${blocks.length}] ✓ Result: ${execResult}`
+        );
+        result = result.replace(block.full, execResult);
+      } catch (err) {
+        console.error(
+          `Deltahack: [Block ${i + 1}/${blocks.length}] ✗ Execution failed:`,
+          err
+        );
+        result = result.replace(
+          block.full,
+          `[Code Error: ${err.message}]`
+        );
+      }
+    }
+
+    return result;
+  }
+
   function createUI() {
     console.log("Deltahack: Creating UI...");
     if (state.resultIframe) {
@@ -257,25 +503,38 @@
       showApiKeySetup();
     }
 
-    document.addEventListener("keydown", (e) => {
-      if (!state.resultIframe) return;
-
-      const keybind = state.hideKeybind.toLowerCase();
-      const parts = keybind.split("+");
+    function matchKeybind(e, keybindStr) {
+      const parts = keybindStr.toLowerCase().split("+");
       const key = parts[parts.length - 1];
       const needsCtrl = parts.includes("ctrl");
       const needsAlt = parts.includes("alt");
       const needsShift = parts.includes("shift");
+      return (
+        e.key.toLowerCase() === key &&
+        (needsCtrl ? e.ctrlKey : !e.ctrlKey) &&
+        (needsAlt ? e.altKey : !e.altKey) &&
+        (needsShift ? e.shiftKey : !e.shiftKey)
+      );
+    }
 
-      const keyMatch = e.key.toLowerCase() === key;
-      const ctrlMatch = needsCtrl ? e.ctrlKey : !e.ctrlKey;
-      const altMatch = needsAlt ? e.altKey : !e.altKey;
-      const shiftMatch = needsShift ? e.shiftKey : !e.shiftKey;
+    document.addEventListener("keydown", (e) => {
+      if (!state.resultIframe) return;
 
-      if (keyMatch && ctrlMatch && altMatch && shiftMatch) {
+      if (matchKeybind(e, state.hideKeybind)) {
         e.preventDefault();
         e.stopPropagation();
         toggleIframeVisibility();
+        return;
+      }
+
+      if (matchKeybind(e, state.scanKeybind)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const scanBtn = document.querySelector(".scan-btn");
+        if (scanBtn && !scanBtn.disabled) {
+          scanPage();
+        }
+        return;
       }
     });
   }
@@ -476,6 +735,32 @@
             </div>
           </div>
         </div>
+        <div class="setting-item">
+          <div class="setting-item-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Scan Keybind</div>
+              <div class="setting-label-desc">Quick scan shortcut</div>
+            </div>
+            <div class="setting-control">
+              <input type="text" id="settings-scan-keybind" placeholder="ctrl+r" value="${
+                state.scanKeybind
+              }">
+            </div>
+          </div>
+        </div>
+        <div class="setting-item">
+          <div class="setting-item-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Proxy URL</div>
+              <div class="setting-label-desc">Route API calls through a proxy to bypass CSP (optional)</div>
+            </div>
+            <div class="setting-control">
+              <input type="text" id="settings-proxy-url" placeholder="https://your-proxy.workers.dev" value="${
+                state.proxyUrl
+              }">
+            </div>
+          </div>
+        </div>
         <div class="settings-buttons">
           <button class="back-settings-btn" id="back-settings" title="Go back"><i data-lucide="chevron-left"></i></button>
           <button class="save-settings-btn-row" id="save-settings"><i data-lucide="save"></i><span>Save Settings</span></button>
@@ -495,12 +780,16 @@
     const tokenSlider = resultDiv.querySelector("#settings-max-tokens");
     const tokenValueDisplay = resultDiv.querySelector("#token-value");
     const keybindInput = resultDiv.querySelector("#settings-keybind");
+    const scanKeybindInput = resultDiv.querySelector("#settings-scan-keybind");
+    const proxyUrlInput = resultDiv.querySelector("#settings-proxy-url");
 
     const originalValues = {
       apiKey: CONFIG.GEMINI_API_KEY,
       maxTokens: state.maxTokens,
       showExplanations: state.showExplanations,
       hideKeybind: state.hideKeybind,
+      scanKeybind: state.scanKeybind,
+      proxyUrl: state.proxyUrl,
     };
 
     function hasChanges() {
@@ -514,12 +803,16 @@
       const currentExplanations =
         explanationsToggle.classList.contains("active");
       const currentKeybind = keybindInput.value.trim();
+      const currentScanKeybind = scanKeybindInput.value.trim();
+      const currentProxyUrl = proxyUrlInput.value.trim();
 
       return (
         currentApiKey !== originalValues.apiKey ||
         currentMaxTokens !== originalValues.maxTokens ||
         currentExplanations !== originalValues.showExplanations ||
-        currentKeybind !== originalValues.hideKeybind
+        currentKeybind !== originalValues.hideKeybind ||
+        currentScanKeybind !== originalValues.scanKeybind ||
+        currentProxyUrl !== originalValues.proxyUrl
       );
     }
 
@@ -575,6 +868,15 @@
         state.hideKeybind = keybind;
         localStorage.setItem("math_scanner_hide_keybind", keybind);
       }
+
+      const scanKeybind = scanKeybindInput.value.trim();
+      if (scanKeybind) {
+        state.scanKeybind = scanKeybind;
+        localStorage.setItem("math_scanner_scan_keybind", scanKeybind);
+      }
+
+      state.proxyUrl = proxyUrlInput.value.trim();
+      localStorage.setItem("math_scanner_proxy_url", state.proxyUrl);
 
       console.log("Deltahack: Settings saved.");
       showResult("Ready to scan", false, true, true);
@@ -650,8 +952,9 @@
 
     try {
       console.log("Deltahack: Sending fetch request to Gemini...");
+      const apiUrl = state.proxyUrl || CONFIG.GEMINI_API_URL;
       const response = await fetch(
-        `${CONFIG.GEMINI_API_URL}?key=${CONFIG.GEMINI_API_KEY}`,
+        `${apiUrl}?key=${CONFIG.GEMINI_API_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -661,8 +964,8 @@
                 parts: [
                   {
                     text: state.showExplanations
-                      ? "Solve the math problem from this DeltaMath page. Text may be fragmented (e.g., 'f(x)=9(1.05)\\n-\\nx' means 'f(x)=9(1.05)^-x'). Answer ALL parts. Use {{expr}} for calculations: {{5000+2000*3}} becomes 11000, {{4*Math.sqrt(35)}} for roots. Wrap each answer in guillemets «». For multiple parts:\nDomain: «[13, 18]»\nRange: «(-∞, 8]»\nCommon answers: 'does NOT make sense', 'does make sense', 'all real numbers', 'non-negative real numbers'. Provide concise step-by-step explanations for your work. If it is a graphing problem, provide the key points or equations and explain how to plot them. If you cannot answer for any reason, simply say 'Cannot solve this problem.'"
-                      : "Solve the math problem from this DeltaMath page. Text may be fragmented (e.g., 'f(x)=9(1.05)\\n-\\nx' means 'f(x)=9(1.05)^-x'). Answer ALL parts. Use {{expr}} for calculations: {{5000+2000*3}} becomes 11000, {{4*Math.sqrt(35)}} for roots. Wrap each answer in guillemets «». For multiple parts:\nDomain: «[13, 18]»\nRange: «(-∞, 8]»\nCommon answers: 'does NOT make sense', 'does make sense', 'all real numbers', 'non-negative real numbers'. Be concise and don't include steps/explanations unless specifically requested. If it is a graphing problem, provide only the key points or equations needed to plot the graph, not a full description. If you cannot answer for any reason, simply say 'Cannot solve this problem.'",
+                      ? "Solve the math problem from this DeltaMath page. Text may be fragmented (e.g., 'f(x)=9(1.05)\\n-\\nx' means 'f(x)=9(1.05)^-x'). Answer ALL parts.\n\nCRITICAL RULE — MANDATORY CODE EXECUTION:\n- You MUST perform ALL numerical calculations using [EXEC_JS]...[/EXEC_JS] blocks. NEVER compute numbers yourself — your arithmetic is unreliable.\n- Do NOT write your own calculated number anywhere. The code block output IS the number. Do NOT duplicate or guess the result.\n- Do NOT write comments in code blocks. No // or /* comments. Just raw code to save tokens.\n- JS code MUST use 'return' for the final value.\n\nExample:\n«[EXEC_JS]\nvar a = 5000 * Math.pow(1.05, 12);\nreturn Math.round(a * 100) / 100;\n[/EXEC_JS]»\n\nWrap each final answer in guillemets «». Place the [EXEC_JS] block INSIDE the «» so its output becomes the answer. For non-numeric answers just write them directly: «all real numbers»\n\nFor multiple parts, label each:\nDomain: «[13, 18]»\nRange: «(-∞, 8]»\n\nCommon non-numeric answers: 'does NOT make sense', 'does make sense', 'all real numbers', 'non-negative real numbers'.\n\nProvide concise step-by-step explanations for your reasoning (but never manually compute a number — always use a code block). If it is a graphing problem, provide key points/equations and explain how to plot them. If you cannot answer, say 'Cannot solve this problem.'"
+                      : "Solve the math problem from this DeltaMath page. Text may be fragmented (e.g., 'f(x)=9(1.05)\\n-\\nx' means 'f(x)=9(1.05)^-x'). Answer ALL parts.\n\nCRITICAL RULE — MANDATORY CODE EXECUTION:\n- You MUST perform ALL numerical calculations using [EXEC_JS]...[/EXEC_JS] blocks. NEVER compute numbers yourself — your arithmetic is unreliable.\n- Do NOT write your own calculated number anywhere. The code block output IS the number. Do NOT duplicate or guess the result.\n- Do NOT write comments in code blocks. No // or /* comments. Just raw code to save tokens.\n- JS code MUST use 'return' for the final value.\n\nExample:\n«[EXEC_JS]\nvar a = 5000 * Math.pow(1.05, 12);\nreturn Math.round(a * 100) / 100;\n[/EXEC_JS]»\n\nWrap each final answer in guillemets «». Place the [EXEC_JS] block INSIDE the «» so its output becomes the answer. For non-numeric answers just write them directly: «all real numbers»\n\nFor multiple parts, label each:\nDomain: «[13, 18]»\nRange: «(-∞, 8]»\n\nCommon non-numeric answers: 'does NOT make sense', 'does make sense', 'all real numbers', 'non-negative real numbers'.\n\nDo NOT include any explanations, steps, or reasoning. Output ONLY the labeled answers with «» markers. No extra text. If it is a graphing problem, provide only the key points or equations needed. If you cannot answer, say 'Cannot solve this problem.'",
                   },
                   {
                     text: pageText,
@@ -730,8 +1033,18 @@
         throw new Error("No answer received (invalid response structure).");
       }
 
-      const answer = data.candidates[0].content.parts[0].text;
+      let answer = data.candidates[0].content.parts[0].text;
       console.log("Deltahack: Answer received:", answer);
+
+      try {
+        answer = await processCodeBlocks(answer);
+      } catch (codeErr) {
+        console.error(
+          "Deltahack: Code block processing error:",
+          codeErr
+        );
+      }
+
       showResult(answer, false, false, true);
     } catch (error) {
       console.error("Deltahack: Gemini API error:", error);
@@ -903,29 +1216,13 @@
         copyBtn.addEventListener("click", async () => {
           const originalText = copyBtn.textContent;
           try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              await navigator.clipboard.writeText(evaluatedAnswer);
-            } else {
-              const tempArea = document.createElement("textarea");
-              tempArea.value = evaluatedAnswer;
-              tempArea.style.position = "fixed";
-              tempArea.style.opacity = "0";
-              document.body.appendChild(tempArea);
-              try {
-                tempArea.focus();
-                tempArea.select();
-                const succeeded = document.execCommand("copy");
-                if (!succeeded) throw new Error("Copy failed");
-              } finally {
-                document.body.removeChild(tempArea);
-              }
-            }
+            await copyWithRetry(evaluatedAnswer);
             copyBtn.textContent = "✓";
             setTimeout(() => {
               copyBtn.textContent = originalText;
             }, 1500);
           } catch (e) {
-            console.error("Copy failed:", e);
+            console.error("Deltahack: Copy failed:", e);
             copyBtn.textContent = "Failed";
             setTimeout(() => {
               copyBtn.textContent = originalText;
@@ -987,30 +1284,9 @@
         event.stopPropagation()
       );
       copyButton.addEventListener("click", async () => {
-        if (!state.rawAnswer) {
-          return;
-        }
-
+        if (!state.rawAnswer) return;
         try {
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            await navigator.clipboard.writeText(state.rawAnswer);
-          } else {
-            const tempArea = document.createElement("textarea");
-            tempArea.value = state.rawAnswer;
-            tempArea.style.position = "fixed";
-            tempArea.style.opacity = "0";
-            document.body.appendChild(tempArea);
-            try {
-              tempArea.focus();
-              tempArea.select();
-              const succeeded = document.execCommand("copy");
-              if (!succeeded) {
-                throw new Error("Fallback copy command was unsuccessful");
-              }
-            } finally {
-              document.body.removeChild(tempArea);
-            }
-          }
+          await copyWithRetry(state.rawAnswer);
           const originalHTML = copyButton.innerHTML;
           copyButton.innerHTML = `<i data-lucide="check"></i>`;
           loadLucideIfNeeded();
@@ -1041,25 +1317,22 @@
       state.autoCopy &&
       state.rawAnswer
     ) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard
-          .writeText(state.rawAnswer)
-          .then(() => {
-            console.log("Deltahack: Auto-copied answer:", state.rawAnswer);
-            if (copyButton) {
-              const originalHTML = copyButton.innerHTML;
-              copyButton.innerHTML = `<i data-lucide="check"></i>`;
+      copyWithRetry(state.rawAnswer)
+        .then(() => {
+          console.log("Deltahack: Auto-copied answer:", state.rawAnswer);
+          if (copyButton) {
+            const originalHTML = copyButton.innerHTML;
+            copyButton.innerHTML = `<i data-lucide="check"></i>`;
+            loadLucideIfNeeded();
+            setTimeout(() => {
+              copyButton.innerHTML = originalHTML;
               loadLucideIfNeeded();
-              setTimeout(() => {
-                copyButton.innerHTML = originalHTML;
-                loadLucideIfNeeded();
-              }, 2000);
-            }
-          })
-          .catch((error) => {
-            console.error("Deltahack: Auto-copy failed:", error);
-          });
-      }
+            }, 2000);
+          }
+        })
+        .catch((error) => {
+          console.error("Deltahack: Auto-copy failed after retries:", error);
+        });
     }
 
     document.body.appendChild(resultDiv);
